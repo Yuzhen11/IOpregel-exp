@@ -1,0 +1,264 @@
+import java.io.*; 
+import java.util.*;
+
+import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.*;
+import org.apache.hadoop.io.*;
+import org.apache.hadoop.mapreduce.Job;
+import org.apache.hadoop.mapreduce.lib.input.*;
+import org.apache.hadoop.util.GenericOptionsParser;
+
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.Iterator;
+import java.util.List;
+import java.util.StringTokenizer;
+
+import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.io.LongWritable;
+import org.apache.hadoop.io.Text;
+import org.apache.hadoop.mapred.FileInputFormat;
+import org.apache.hadoop.mapred.FileOutputFormat;
+import org.apache.hadoop.mapred.JobClient;
+import org.apache.hadoop.mapred.JobConf;
+import org.apache.hadoop.mapred.MapReduceBase;
+import org.apache.hadoop.mapred.Mapper;
+import org.apache.hadoop.mapred.OutputCollector;
+import org.apache.hadoop.mapred.Reducer;
+import org.apache.hadoop.mapred.Reporter;
+import org.apache.hadoop.mapred.TextInputFormat;
+import org.apache.hadoop.mapred.TextOutputFormat;
+
+
+
+public class PageRank
+{
+	public static final String RANK = "RANK";
+	
+	public static class FirstMapper extends MapReduceBase implements
+			Mapper<Object, Text, IntWritable, FloatWritable> {
+	
+		public void map(Object key, Text value, OutputCollector<IntWritable, FloatWritable> output, Reporter reporter) throws IOException {
+			
+			//vid neighbors_num n1 n2 ...
+			String[] tokens = value.toString().split("\\s+");
+			IntWritable SourceId = new IntWritable(Integer.parseInt(tokens[0]));
+			int num = Integer.parseInt(tokens[1]);
+			if (num == 0) return;
+			
+			for (int i = 2; i < tokens.length; i++){
+				IntWritable TargetId = new IntWritable(Integer.parseInt(tokens[i]));
+				//context.write(TargetId, new FloatWritable(1.0f/num));
+				
+				output.collect(TargetId, new FloatWritable(1.0f/num));
+			}
+		}
+	}
+	
+	
+	public static class JoinMapper extends MapReduceBase implements
+			Mapper<Object, Text, IntWritable, Text> {
+	
+		public void map(Object key, Text value, OutputCollector<IntWritable, Text> output, Reporter reporter) throws IOException {
+			
+			//vid neighbors_num n1 n2 ...
+			//vid rank
+			String[] tokens = value.toString().split("\\s+");
+			IntWritable SourceId = new IntWritable(Integer.parseInt(tokens[0]));
+			StringBuilder sb = new StringBuilder();
+			for (int i = 1; i < tokens.length; i++){
+				if (sb.length() != 0) sb.append(" ");
+				sb.append(tokens[i]);
+			}
+			output.collect(SourceId, new Text(sb.toString()));
+		}
+	}
+	
+	public static class JoinReducer extends MapReduceBase implements
+            Reducer<IntWritable, Text, IntWritable, Text> { 			
+            
+        public void reduce(IntWritable key, Iterator<Text> values, OutputCollector<IntWritable, Text> output, Reporter reporter) throws IOException {
+        	
+        	float myRank = 0.0f;
+        	ArrayList<String> neighbors = new ArrayList<String>();
+        	while (values.hasNext()){
+        		String str = values.next().toString();
+        		if (str.endsWith(RANK)){
+        			//rank table
+        			myRank = Float.parseFloat(str.substring(0, str.length()-4));
+        		}
+        		else{
+        			//adj table
+        			String[] tmp = str.split("\\s+");
+        			for (String i : tmp)
+	        			neighbors.add(i);
+        		}
+        	}
+        	if (neighbors.size() == 0) return;
+        	int num = Integer.parseInt(neighbors.get(0));
+        	if (num == 0) return;
+        	
+        	float toSend = myRank/(float)num;
+        	
+        	for (int i = 1; i < neighbors.size(); ++ i)
+        	{
+        		IntWritable TargetId = new IntWritable(Integer.parseInt(neighbors.get(i)));
+        		
+        		output.collect(TargetId, new Text(Float.toString(toSend)));
+        	}
+        }
+    }
+    
+    public static class AggMapper extends MapReduceBase implements
+			Mapper<Object, Text, IntWritable, FloatWritable> {
+		
+		public void map(Object key, Text value, OutputCollector<IntWritable, FloatWritable> output, Reporter reporter) throws IOException {	
+			//id rank
+			String[] tokens = value.toString().split("\\s+");
+			IntWritable SourceId = new IntWritable(Integer.parseInt(tokens[0]));
+			FloatWritable rank = new FloatWritable(Float.parseFloat(tokens[1]));
+			output.collect(SourceId, rank);
+		}
+	}
+	
+	public static class AggReducer extends MapReduceBase implements
+            Reducer<IntWritable, FloatWritable, IntWritable, Text> { 			
+            
+        public void reduce(IntWritable key, Iterator<FloatWritable> values, OutputCollector<IntWritable, Text> output, Reporter reporter) throws IOException {
+        	
+        	float sum = 0.0f;
+        	while (values.hasNext()) {
+        		sum += values.next().get();
+        	}
+        	output.collect(key, new Text(Float.toString(0.85f*sum+0.15f)+RANK) );
+        }   
+    }
+    
+    public static class AggCombiner extends MapReduceBase implements
+            Reducer<IntWritable, FloatWritable, IntWritable, FloatWritable> { 			
+            
+        public void reduce(IntWritable key, Iterator<FloatWritable> values, OutputCollector<IntWritable, FloatWritable> output, Reporter reporter) throws IOException{
+        	
+        	float sum = 0.0f;
+        	while (values.hasNext()) {
+        		sum += values.next().get();
+        	}
+        	FloatWritable rank = new FloatWritable(sum);
+        	output.collect(key, rank);
+        }   
+    }
+    
+    /*
+    public static void main(String[] args) throws Exception {
+    	Configuration conf = new Configuration();
+ 
+        String[] otherArgs = new GenericOptionsParser(conf, args)
+                    .getRemainingArgs();
+
+        if (otherArgs.length != 2) {
+              System.err.println("Args: <in> <out>");
+              System.exit(2);
+        }
+        
+        Job job = new Job(conf, "PageRank");
+ 		job.setJarByClass(PageRank.class);
+ 		
+ 		job.setMapperClass(FirstMapper.class);
+ 		job.setReducerClass(AggReducer.class);
+ 		job.setCombinerClass(AggCombiner.class);
+ 		
+ 		job.setMapOutputKeyClass(IntWritable.class);
+        job.setMapOutputValueClass(FloatWritable.class);
+ 		
+ 		job.setOutputKeyClass(IntWritable.class);
+        job.setOutputValueClass(Text.class);
+        
+        job.setInputFormatClass(TextInputFormat.class);
+        FileInputFormat.addInputPath(job, new Path(args[0]));
+	    FileOutputFormat.setOutputPath(job, new Path(args[1]));
+	    
+	    job.waitForCompletion(true);
+    }
+    */
+    
+    public static void main(String[] args) throws Exception {
+    	
+        String inputPath = args[0];
+        String outputPath = args[1];
+        int specIteration = Integer.parseInt(args[2]);
+        //set number of reducers
+        int numReducers = 2*16;
+        
+        //step 1
+        JobConf conf0 = new JobConf(PageRank.class);
+        conf0.setJobName("PageRank Step1");
+        
+        conf0.setOutputKeyClass(IntWritable.class);
+        conf0.setOutputValueClass(Text.class);
+        conf0.setMapOutputKeyClass(IntWritable.class);
+        conf0.setMapOutputValueClass(FloatWritable.class);
+        
+        conf0.setMapperClass(FirstMapper.class);
+ 		conf0.setReducerClass(AggReducer.class);
+ 		conf0.setCombinerClass(AggCombiner.class);
+ 		conf0.setInputFormat(TextInputFormat.class);
+ 		conf0.setOutputFormat(TextOutputFormat.class);
+ 		FileInputFormat.addInputPath(conf0, new Path(args[0]));
+	    FileOutputFormat.setOutputPath(conf0, new Path(args[1]+"/i-1"));
+	    
+	    conf0.setNumReduceTasks(numReducers);
+	    JobClient.runJob(conf0);
+    
+    	
+    	//loop
+    	JobConf conf1 = new JobConf();
+    	conf1.setOutputKeyClass(IntWritable.class);
+    	conf1.setOutputValueClass(Text.class);
+    	conf1.setMapOutputKeyClass(IntWritable.class);
+        conf1.setMapOutputValueClass(Text.class);
+        conf1.setMapperClass(JoinMapper.class);
+ 		conf1.setReducerClass(JoinReducer.class);
+    	conf1.setInputFormat(TextInputFormat.class);
+ 		conf1.setOutputFormat(TextOutputFormat.class);
+
+ 		
+ 		JobConf conf2 = new JobConf();
+    	conf2.setOutputKeyClass(IntWritable.class);
+    	conf2.setOutputValueClass(Text.class);
+    	conf2.setMapOutputKeyClass(IntWritable.class);
+        conf2.setMapOutputValueClass(FloatWritable.class);
+        conf2.setMapperClass(AggMapper.class);
+ 		conf2.setReducerClass(AggReducer.class);
+ 		conf2.setCombinerClass(AggCombiner.class);
+    	conf2.setInputFormat(TextInputFormat.class);
+ 		conf2.setOutputFormat(TextOutputFormat.class);
+
+ 		
+ 		JobConf conf = new JobConf(PageRank.class);
+ 		conf.setJobName("PageRank");
+ 		conf.setLoopInputOutput(RankLoopInputOutput.class);
+        conf.setLoopReduceCacheSwitch(RankReduceCacheSwitch.class);
+        conf.setLoopReduceCacheFilter(RankReduceCacheFilter.class);
+        conf.setLoopStepHook(PageRankStepHook.class);
+        conf.setInputPath(inputPath);
+        conf.setOutputPath(outputPath);
+        
+        
+        conf.setNumReduceTasks(numReducers);
+ 		conf.setStepConf(0, conf1);
+        conf.setStepConf(1, conf2);
+        conf.setIterative(true);
+        conf.setNumIterations(specIteration);
+        
+        JobClient.runJob(conf);
+        
+    }
+    
+    
+    
+    
+}
+
+
+
+
